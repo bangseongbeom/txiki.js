@@ -1107,6 +1107,32 @@ static JSValue TJS_NewUint8ArrayExternal(JSContext *ctx, uint8_t *data, size_t s
     return JS_NewUint8Array(ctx, data, size, NULL, NULL, false);
 }
 
+// Compute the base address and length for a zero-copy view created from a
+// (byteLength, byteOffset?) pair. Returns false (with a pending exception) when
+// the arguments are invalid.
+static bool js_ffi_view_range(JSContext *ctx,
+                              void *ptr,
+                              JSValue length_val,
+                              JSValue offset_val,
+                              uint8_t **pbase,
+                              size_t *psize) {
+    int64_t length;
+    if (JS_ToInt64(ctx, &length, length_val)) {
+        return false;
+    }
+    if (length < 0) {
+        JS_ThrowRangeError(ctx, "byteLength must not be negative");
+        return false;
+    }
+    int64_t offset = 0;
+    if (!JS_IsUndefined(offset_val) && JS_ToInt64(ctx, &offset, offset_val)) {
+        return false;
+    }
+    *pbase = (uint8_t *) ptr + offset;
+    *psize = (size_t) length;
+    return true;
+}
+
 static JSValue js_ptr_to_buffer(JSContext *ctx, JSValue this_val, int argc, JSValue *argv) {
     TJS_CHECK_ARG_RET(ctx, JS_IS_PTR(ctx, argv[0]), 0, "pointer");
     TJS_CHECK_ARG_RET(ctx, JS_IsNumber(argv[1]), 1, "number");
@@ -1135,6 +1161,19 @@ static JSValue js_deref_ptr(JSContext *ctx, JSValue this_val, int argc, JSValue 
         ptr = *(void **) ptr;
     }
     return JS_NEW_UINTPTR_T(ctx, ptr);
+}
+
+// Detach an ArrayBuffer, invalidating every view over it. For the zero-copy
+// views created by this module (NULL free callback) this just flips the
+// detached bit: it neither reads nor frees the underlying memory, so it is safe
+// to call after the native memory has already been freed.
+static JSValue js_detach_buffer(JSContext *ctx, JSValue this_val, int argc, JSValue *argv) {
+    if (!JS_IsArrayBuffer(argv[0])) {
+        JS_ThrowTypeError(ctx, "expected argument 1 to be an ArrayBuffer");
+        return JS_EXCEPTION;
+    }
+    JS_DetachArrayBuffer(ctx, argv[0]);
+    return JS_UNDEFINED;
 }
 
 #if defined(_WIN32)
@@ -1307,11 +1346,45 @@ static JSValue js_ffi_pointer_equals(JSContext *ctx, JSValue this_val, int argc,
     return JS_NewBool(ctx, ptr == other);
 }
 
+// Create a zero-copy Uint8Array view over `byteLength` bytes starting at this
+// pointer plus an optional `byteOffset`. The view aliases the native memory; no
+// copy is made and the runtime does not take ownership of it.
+static JSValue js_ffi_pointer_to_uint8array(JSContext *ctx, JSValue this_val, int argc, JSValue *argv) {
+    void *ptr = JS_GetOpaque(this_val, js_ffi_pointer_classid);
+    if (!ptr) {
+        JS_ThrowTypeError(ctx, "expected this to be Pointer");
+        return JS_EXCEPTION;
+    }
+    uint8_t *base;
+    size_t size;
+    if (!js_ffi_view_range(ctx, ptr, argv[0], argc > 1 ? argv[1] : JS_UNDEFINED, &base, &size)) {
+        return JS_EXCEPTION;
+    }
+    return TJS_NewUint8ArrayExternal(ctx, base, size);
+}
+
+// Like js_ffi_pointer_to_uint8array, but returns a zero-copy ArrayBuffer.
+static JSValue js_ffi_pointer_to_arraybuffer(JSContext *ctx, JSValue this_val, int argc, JSValue *argv) {
+    void *ptr = JS_GetOpaque(this_val, js_ffi_pointer_classid);
+    if (!ptr) {
+        JS_ThrowTypeError(ctx, "expected this to be Pointer");
+        return JS_EXCEPTION;
+    }
+    uint8_t *base;
+    size_t size;
+    if (!js_ffi_view_range(ctx, ptr, argv[0], argc > 1 ? argv[1] : JS_UNDEFINED, &base, &size)) {
+        return JS_EXCEPTION;
+    }
+    return JS_NewArrayBuffer(ctx, base, size, NULL, NULL, false);
+}
+
 static JSClassDef js_ffi_pointer_class = { "Pointer" };
 static const JSCFunctionListEntry js_ffi_pointer_proto_funcs[] = {
     TJS_CFUNC_DEF("toString", 0, js_ffi_pointer_to_string),
     TJS_CFUNC_DEF("offset", 1, js_ffi_pointer_offset),
     TJS_CFUNC_DEF("equals", 1, js_ffi_pointer_equals),
+    TJS_CFUNC_DEF("toUint8Array", 2, js_ffi_pointer_to_uint8array),
+    TJS_CFUNC_DEF("toArrayBuffer", 2, js_ffi_pointer_to_arraybuffer),
 };
 
 #pragma endregion "FfiPointer class definition"
@@ -1445,6 +1518,7 @@ static const JSCFunctionListEntry funcs[] = {
     TJS_CFUNC_DEF("toCString", 1, js_to_cstring),
     TJS_CFUNC_DEF("derefPtr", 2, js_deref_ptr),
     TJS_CFUNC_DEF("ptrToBuffer", 2, js_ptr_to_buffer),
+    TJS_CFUNC_DEF("detachBuffer", 1, js_detach_buffer),
 
     TJS_CONST_STRING_DEF(LIBC_NAME),
     TJS_CONST_STRING_DEF(LIBM_NAME),

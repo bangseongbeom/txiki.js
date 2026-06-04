@@ -27,6 +27,37 @@ declare module 'tjs:ffi'{
         offset(n: number): NativePointer;
         /** Returns `true` if both pointers refer to the same address. */
         equals(other: NativePointer | null): boolean;
+        /**
+         * Returns a **zero-copy** `Uint8Array` of `byteLength` bytes that aliases
+         * the native memory starting at this pointer (plus an optional
+         * `byteOffset`). No data is copied: reads and writes go straight to the
+         * underlying memory.
+         *
+         * ⚠️ The view does **not** keep the memory alive and the runtime never
+         * frees it. The caller is responsible for ensuring the memory outlives
+         * every view over it; accessing a view after the memory has been freed,
+         * moved or reallocated is undefined behaviour and can crash the process.
+         * When the memory is owned by a JavaScript object (e.g. another buffer),
+         * prefer the {@link toUint8Array} free function with its `owner` option.
+         */
+        toUint8Array(byteLength: number, byteOffset?: number): Uint8Array;
+        /**
+         * Like {@link NativePointer.toUint8Array}, but returns a zero-copy
+         * `ArrayBuffer`. The same lifetime caveats apply.
+         */
+        toArrayBuffer(byteLength: number, byteOffset?: number): ArrayBuffer;
+    }
+
+    /** Options for the {@link toUint8Array} and {@link toArrayBuffer} views. */
+    export interface ViewOptions {
+        /**
+         * A JavaScript object that owns the underlying memory. The view holds a
+         * reference to it, so the garbage collector cannot reclaim the owner
+         * (and its memory) while the view is still reachable. Use this when the
+         * pointer was derived from a JS-owned buffer, e.g. via
+         * {@link bufferToPointer}.
+         */
+        owner?: object;
     }
 
     /**
@@ -145,6 +176,56 @@ declare module 'tjs:ffi'{
     export function bufferToString(buf: Uint8Array): string;
     export function stringToBuffer(s: string): Uint8Array;
     export function bufferToPointer(buf: Uint8Array): NativePointer;
+
+    /**
+     * Returns a **zero-copy** `Uint8Array` of `byteLength` bytes that aliases the
+     * native memory at `ptr` (plus an optional `byteOffset`). No data is copied.
+     *
+     * ⚠️ The view aliases memory the runtime does not own or track. Reading or
+     * writing it after the memory has been freed, moved or reallocated is
+     * undefined behaviour. Pass `options.owner` to pin the JavaScript object that
+     * owns the memory so it outlives the view.
+     *
+     * ```js
+     * import { bufferToPointer, toUint8Array } from 'tjs:ffi';
+     *
+     * const src = new Uint8Array([1, 2, 3, 4]);
+     * const view = toUint8Array(bufferToPointer(src), src.length, 0, { owner: src });
+     * view[0] = 42;
+     * console.log(src[0]); // 42 — same memory
+     * ```
+     */
+    export function toUint8Array(ptr: NativePointer, byteLength: number, byteOffset?: number, options?: ViewOptions): Uint8Array;
+
+    /**
+     * Like {@link toUint8Array}, but returns a zero-copy `ArrayBuffer`. The same
+     * lifetime caveats apply.
+     */
+    export function toArrayBuffer(ptr: NativePointer, byteLength: number, byteOffset?: number, options?: ViewOptions): ArrayBuffer;
+
+    /**
+     * Detach an `ArrayBuffer`, invalidating every view over it: afterwards its
+     * `byteLength` is `0`, `detached` is `true`, and any `TypedArray` backed by
+     * it reads as empty.
+     *
+     * Use this to make a zero-copy view safe to keep around after you have freed
+     * the native memory it aliased — it turns a potential use-after-free into a
+     * harmless empty buffer. Unlike the standard `ArrayBuffer.prototype.transfer()`,
+     * it does not read or copy the underlying bytes, so it is safe to call once
+     * the memory is gone.
+     *
+     * ```js
+     * import { toArrayBuffer, detachBuffer } from 'tjs:ffi';
+     *
+     * const buf = toArrayBuffer(ptr, len);
+     * // ... use buf ...
+     * freeNative(ptr);     // you free the native memory
+     * detachBuffer(buf);   // further access throws/reads empty instead of UB
+     * ```
+     *
+     * To detach a view returned as a `Uint8Array`, pass its `.buffer`.
+     */
+    export function detachBuffer(buffer: ArrayBuffer): void;
 
     export class Pointer<T, N extends number>{
         constructor(addr: NativePointer, level: N, type: SimpleType<T>);

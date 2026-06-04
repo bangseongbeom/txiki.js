@@ -286,6 +286,41 @@ export function bufferToPointer(buf) {
     return ffiInt.getArrayBufPtr(buf);
 }
 
+// Used to pin a memory owner to a view so the GC keeps it alive (see below).
+const kViewOwner = Symbol('tjs.ffi.viewOwner');
+
+function attachOwner(view, options) {
+    const owner = options?.owner;
+
+    if (owner !== undefined && owner !== null) {
+        // Hold a reference to the object that owns the memory for as long as the
+        // view itself is reachable, so it can't be collected out from under us.
+        Object.defineProperty(view, kViewOwner, { value: owner });
+    }
+
+    return view;
+}
+
+export function toUint8Array(ptr, byteLength, byteOffset = 0, options = {}) {
+    if (ptr === null) {
+        throw new TypeError('cannot create a view over a null pointer');
+    }
+
+    return attachOwner(ptr.toUint8Array(byteLength, byteOffset), options);
+}
+
+export function toArrayBuffer(ptr, byteLength, byteOffset = 0, options = {}) {
+    if (ptr === null) {
+        throw new TypeError('cannot create a view over a null pointer');
+    }
+
+    return attachOwner(ptr.toArrayBuffer(byteLength, byteOffset), options);
+}
+
+export function detachBuffer(buffer) {
+    ffiInt.detachBuffer(buffer);
+}
+
 export class Pointer {
     constructor(addr, level, type) {
         this._type = type;
